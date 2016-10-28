@@ -1,0 +1,121 @@
+#!/bin/bash
+#
+# This script adds a dynamic DNS entry for the host in the name servers. If the system is not joined to the domain, it uses the old nsupdate method.
+
+#if [ `hostname | cut -b1` != "w" ]; then
+#	exit
+#fi
+
+
+# WAIT
+
+sleep $[ ( $RANDOM % 30 ) + 1 ]s
+
+# Check for the correct interface and only output the correct one.
+DFTETH=`ip route | grep default | awk '{print $5}'`
+
+for i in $DFTETH; do
+#	INTIP=`( ifconfig $i | grep "inet addr" | awk -F: '{print $2}' | head -n 1 | awk '{print $1}' ) 2> /dev/null`
+	INTIP=`( ip route | grep "$DFTETH" | grep "src" | awk '{print $9}' ) 2> /dev/null`
+	
+	if [ $INTIP ]; then
+		IP=$INTIP
+		continue
+	fi
+
+done
+
+
+# exit if hostname=localhost so we don't break windows. 
+HN=`hostname | awk -F. '{print $1}'`
+if [ ${HN} == "localhost" ]; then
+	echo "hostname is localhost, failing"
+        exit 1
+fi
+
+
+function oldupdate ()
+{
+        REVIP=`/sbin/ifconfig | grep "inet addr" | awk -F: '{print $2}' | head -n 1 | awk '{print $1}' | awk -F. '{print $4 "." $3 "." $2 "." $1 ".in-addr.arpa."}'`
+        if [ ${HN} == "localhost" ]; then
+                echo "Failed"
+                exit 1
+        fi
+        SERVERS=`grep nameserver /etc/resolv.conf | awk '{print $2}'`
+        for i in `echo $SERVERS`; do
+                echo "server $i
+                zone $DOMAIN
+                update delete $HN.$DOMAIN A
+                update add $HN.$DOMAIN 86400 A $IP
+                send
+                " | nsupdate 2> /dev/null
+
+                echo "server $i
+                update delete $REVIP PTR
+                update add $REVIP 86400 PTR $HN.$DOMAIN
+                send
+                " | nsupdate 2> /dev/null
+        done
+}
+
+function ddns-update ()
+{
+if [ -f /usr/share/centrifydc/libexec/addns ]; then
+	if [ $ADVER == 5 ]; then
+		echo "#################" >> /var/log/ddns-add.log
+		echo $(date)  >> /var/log/ddns-add.log		
+		echo "#################" >> /var/log/ddns-add.err
+		echo $(date)  >> /var/log/ddns-add.err		
+		echo "Running addns with force switch, check=$CHECK, IP=$IP, HN=$HN, DOMAIN=$DOMAIN" >> /var/log/ddns-add.log
+		/usr/share/centrifydc/libexec/addns -UVmf -i $IP -d $DOMAIN 2>> /var/log/ddns-add.err >> /var/log/ddns-add.log
+	else
+		echo "#################" >> /var/log/ddns-add.log
+                echo $(date) >> /var/log/ddns-add.log
+		echo "#################" >> /var/log/ddns-add.err
+                echo $(date) >> /var/log/ddns-add.err
+		echo "Running addns without force switch" >> /var/log/ddns-add.log
+		/usr/share/centrifydc/libexec/addns -UVm -i $IP -d $DOMAIN 2>> /var/log/ddns-add.err >> /var/log/ddns-add.log
+	fi
+fi
+
+
+}
+
+# check for adinfo
+ADINFO=$(which adinfo 2> /dev/null)
+if [ ! -f "$ADINFO" ]; then
+	oldupdate
+	exit
+fi
+
+# check for centrify version
+ADVER=$(adinfo -v | awk '{ print $3}' | awk -F. '{print $1}')
+
+# check to make sure we are joined to a zone
+ZONE=`$ADINFO -z | awk -F\/ '{print $4}'`
+if [ ! "$ZONE" ]; then
+	oldupdate 
+	exit
+fi
+DOMAIN=`/usr/bin/adinfo -d`
+
+if [ "$ZONE" ] && [ "$IP" ]; then
+	ddns-update
+	COUNT=0
+	while [ $COUNT -lt 10 ]; do
+		TIMERTEST=`tail /var/log/ddns-add.err | grep -i time | grep -v "ADDNS TCP Timeout value"`
+		if [ ! -z "$TIMERTEST" ]; then
+	                sleep 10
+	                ddns-update
+		else
+			exit
+		fi
+		let COUNT=COUNT+1
+	done
+	if [ $COUNT -gt 2 ]; then
+		echo "found - $TIMERTEST" | mail -s "DNS update failed for `hostname` $COUNT times" test@example.com
+	fi
+
+
+fi
+
